@@ -1,4 +1,8 @@
 -- init.sql
+-- Per-statement execution stats for slow-query observability
+-- (library is preloaded via shared_preload_libraries in postgresql.conf)
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+
 -- Create role for anonymous user
 CREATE ROLE anon NOLOGIN;
 
