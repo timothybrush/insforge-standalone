@@ -1,4 +1,14 @@
 -- init.sql
+-- Per-statement execution stats for slow-query observability. Lives in a
+-- dedicated schema (on the insforge.internal_schemas deny-list, and with no
+-- USAGE grant for API roles) so the view is never reachable through the
+-- PostgREST data API — in public it would be swept up by the blanket GRANT
+-- below and auto-exposed to anon. Library is preloaded via
+-- shared_preload_libraries in postgresql.conf. Query it as superuser:
+--   SELECT * FROM monitoring.pg_stat_statements;
+CREATE SCHEMA IF NOT EXISTS monitoring;
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements WITH SCHEMA monitoring;
+
 -- Create role for anonymous user
 CREATE ROLE anon NOLOGIN;
 
