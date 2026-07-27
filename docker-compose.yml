@@ -9,7 +9,7 @@ services:
       resources:
         limits:
           memory: ${POSTGRES_MEMORY:-150M}
-          cpus: '0.5'
+          cpus: '${POSTGRES_CPUS:-0.5}'
         reservations:
           memory: 30M
     environment:
@@ -56,7 +56,7 @@ services:
       resources:
         limits:
           memory: ${POSTGREST_MEMORY:-50M}
-          cpus: '0.3'
+          cpus: '${POSTGREST_CPUS:-0.3}'
         reservations:
           memory: 20M
     environment:
@@ -100,7 +100,7 @@ services:
       resources:
         limits:
           memory: ${INSFORGE_MEMORY:-150M}
-          cpus: '0.5'
+          cpus: '${INSFORGE_CPUS:-0.5}'
         reservations:
           memory: 50M
     depends_on:
