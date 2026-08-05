@@ -32,8 +32,9 @@ fi
 # PostgREST's share: an equal third on instances with room for it. The legacy
 # 150:50:150 split starved postgrest exactly where load is highest — a 4GB
 # medium gave it 544MB against a 90-connection pool, with its heap grazing the
-# cap after days of uptime. Below ~2GB the scale factor clamps to 1.0 and
-# there is no slack to redistribute, so tiny instances keep the legacy base.
+# cap after days of uptime. Below ~2GB there is little absolute slack — an
+# equal third would shrink postgres/insforge caps on boxes where they are
+# already tight — so tiny instances keep the legacy base.
 if [ "$TOTAL_MEM" -ge 1800 ]; then
     POSTGREST_BASE=150
 else
@@ -96,8 +97,14 @@ else                                  PG_MAX_CONNECTIONS=30;  PGRST_DB_POOL=15  
 fi
 echo "Connection scaling: PGRST_DB_POOL=${PGRST_DB_POOL}, PG_MAX_CONNECTIONS=${PG_MAX_CONNECTIONS} (RAM ${TOTAL_MEM}MB)"
 
-# Verify total doesn't exceed usable memory
+# Verify total doesn't exceed usable memory. Per-service rounding can land
+# up to 2MB over budget (e.g. three .5 round-ups near the 1800MB cutoff);
+# shave any excess off insforge, the least memory-sensitive service.
 TOTAL_ALLOCATED=$(( POSTGRES_MEM + POSTGREST_MEM + INSFORGE_MEM ))
+if [ "$TOTAL_ALLOCATED" -gt "$USABLE_MEM" ]; then
+    INSFORGE_MEM=$(( INSFORGE_MEM - (TOTAL_ALLOCATED - USABLE_MEM) ))
+    TOTAL_ALLOCATED=$USABLE_MEM
+fi
 
 echo ""
 echo "=== Calculated Resource Allocation ==="
@@ -115,7 +122,7 @@ ENV_FILE=".env"
 cp "$ENV_FILE" "${ENV_FILE}.backup.$(date +%Y%m%d_%H%M%S)"
 
 # Remove existing memory settings if present
-sed -i.tmp '/^POSTGRES_MEMORY=/d; /^POSTGREST_MEMORY=/d; /^PGRST_DB_POOL=/d; /^PG_MAX_CONNECTIONS=/d; /^POSTGREST_RTS_HEAP=/d; /^INSFORGE_MEMORY=/d; /^POSTGRES_CPUS=/d; /^POSTGREST_CPUS=/d; /^INSFORGE_CPUS=/d; /^DENO_MEMORY=/d; /^VECTOR_MEMORY=/d; /^NODE_EXPORTER_MEMORY=/d; /^# Auto-generated memory limits/d; /^# Auto-generated resource limits/d; /^# Total system memory:/d; /^# Total CPUs:/d; /^# Usable memory:/d; /^# Scaling factor:/d; /^# CPU scaling factor:/d' "$ENV_FILE"
+sed -i.tmp '/^POSTGRES_MEMORY=/d; /^POSTGREST_MEMORY=/d; /^PGRST_DB_POOL=/d; /^PG_MAX_CONNECTIONS=/d; /^POSTGREST_RTS_HEAP=/d; /^INSFORGE_MEMORY=/d; /^POSTGRES_CPUS=/d; /^POSTGREST_CPUS=/d; /^INSFORGE_CPUS=/d; /^DENO_CPUS=/d; /^VECTOR_CPUS=/d; /^NODE_EXPORTER_CPUS=/d; /^DENO_MEMORY=/d; /^VECTOR_MEMORY=/d; /^NODE_EXPORTER_MEMORY=/d; /^# Auto-generated memory limits/d; /^# Auto-generated resource limits/d; /^# Total system memory:/d; /^# Total CPUs:/d; /^# Usable memory:/d; /^# Scaling factor:/d; /^# CPU scaling factor:/d' "$ENV_FILE"
 rm -f "${ENV_FILE}.tmp"
 
 # Append new resource settings
