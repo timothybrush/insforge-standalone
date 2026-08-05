@@ -1,23 +1,17 @@
 #!/bin/bash
 
-# Auto-scale Docker Compose memory and CPU limits based on total system resources
-# This script maintains the current memory/CPU ratio between services
+# Auto-scale Docker Compose memory limits based on total system memory.
+# CPU is deliberately NOT capped: these are single-tenant hosts, so hard CPU
+# quotas only stop a container from bursting into idle cores (a 0.3-cpu cap
+# on postgrest stalled requests under load while the host sat at load 0.01).
+# Under contention the kernel's default equal cpu.weight arbitrates.
 
 set -e
 
-# Current memory configuration (in MB)
+# Current memory configuration (in MB). POSTGREST_BASE is tier-dependent and
+# set once total memory is known.
 POSTGRES_BASE=150
-POSTGREST_BASE=50
 INSFORGE_BASE=150
-
-# Current CPU configuration (in cores, matches docker-compose.yml defaults)
-POSTGRES_CPUS_BASE=0.5
-POSTGREST_CPUS_BASE=0.3
-INSFORGE_CPUS_BASE=0.5
-
-# Total base memory
-TOTAL_BASE=$(( POSTGRES_BASE + POSTGREST_BASE + INSFORGE_BASE ))
-echo "Base total memory: ${TOTAL_BASE}MB"
 
 # Get total system memory (in MB) and CPU core count
 if [[ "$OSTYPE" == "linux-gnu"* ]]; then
@@ -34,6 +28,21 @@ else
     echo "Unsupported OS: $OSTYPE"
     exit 1
 fi
+
+# PostgREST's share: an equal third on instances with room for it. The legacy
+# 150:50:150 split starved postgrest exactly where load is highest — a 4GB
+# medium gave it 544MB against a 90-connection pool, with its heap grazing the
+# cap after days of uptime. Below ~2GB the scale factor clamps to 1.0 and
+# there is no slack to redistribute, so tiny instances keep the legacy base.
+if [ "$TOTAL_MEM" -ge 1800 ]; then
+    POSTGREST_BASE=150
+else
+    POSTGREST_BASE=50
+fi
+
+# Total base memory
+TOTAL_BASE=$(( POSTGRES_BASE + POSTGREST_BASE + INSFORGE_BASE ))
+echo "Base total memory: ${TOTAL_BASE}MB"
 
 # Set AVAILABLE_MEM to TOTAL_MEM for calculation
 AVAILABLE_MEM=$TOTAL_MEM
@@ -87,31 +96,14 @@ else                                  PG_MAX_CONNECTIONS=30;  PGRST_DB_POOL=15  
 fi
 echo "Connection scaling: PGRST_DB_POOL=${PGRST_DB_POOL}, PG_MAX_CONNECTIONS=${PG_MAX_CONNECTIONS} (RAM ${TOTAL_MEM}MB)"
 
-# --- Scale CPU limits with instance core count ----------------------------------
-# Base config totals 1.3 cpus (0.5 + 0.3 + 0.5), sized for the smallest instances.
-# Reserve 0.3 cores for the host (dockerd, log drivers, ssh), split the rest in the
-# same ratio as the base config. Floor at 1.0 so small instances keep the base
-# limits (cpus is a cap, not an allocation, so mild overcommit there is fine).
-CPU_TOTAL_BASE=$(awk "BEGIN {printf \"%.2f\", $POSTGRES_CPUS_BASE + $POSTGREST_CPUS_BASE + $INSFORGE_CPUS_BASE}")
-RESERVED_CPU=0.3
-USABLE_CPUS=$(awk "BEGIN {printf \"%.2f\", $TOTAL_CPUS - $RESERVED_CPU}")
-CPU_SCALE_FACTOR=$(awk "BEGIN {printf \"%.4f\", $USABLE_CPUS / $CPU_TOTAL_BASE}")
-if (( $(awk "BEGIN {print ($CPU_SCALE_FACTOR < 1.0)}") )); then
-    CPU_SCALE_FACTOR=1.0000
-fi
-POSTGRES_CPUS=$(awk "BEGIN {printf \"%.2f\", $POSTGRES_CPUS_BASE * $CPU_SCALE_FACTOR}")
-POSTGREST_CPUS=$(awk "BEGIN {printf \"%.2f\", $POSTGREST_CPUS_BASE * $CPU_SCALE_FACTOR}")
-INSFORGE_CPUS=$(awk "BEGIN {printf \"%.2f\", $INSFORGE_CPUS_BASE * $CPU_SCALE_FACTOR}")
-echo "CPU scaling: factor ${CPU_SCALE_FACTOR} (${TOTAL_CPUS} cores, ${RESERVED_CPU} reserved)"
-
 # Verify total doesn't exceed usable memory
 TOTAL_ALLOCATED=$(( POSTGRES_MEM + POSTGREST_MEM + INSFORGE_MEM ))
 
 echo ""
 echo "=== Calculated Resource Allocation ==="
-echo "postgres:      ${POSTGRES_MEM}MB, ${POSTGRES_CPUS} cpus (base: ${POSTGRES_BASE}MB, ${POSTGRES_CPUS_BASE} cpus)"
-echo "postgrest:     ${POSTGREST_MEM}MB, ${POSTGREST_CPUS} cpus (base: ${POSTGREST_BASE}MB, ${POSTGREST_CPUS_BASE} cpus, GHC heap cap: ${POSTGREST_RTS_HEAP}M)"
-echo "insforge:      ${INSFORGE_MEM}MB, ${INSFORGE_CPUS} cpus (base: ${INSFORGE_BASE}MB, ${INSFORGE_CPUS_BASE} cpus)"
+echo "postgres:      ${POSTGRES_MEM}MB (base: ${POSTGRES_BASE}MB)"
+echo "postgrest:     ${POSTGREST_MEM}MB (base: ${POSTGREST_BASE}MB, GHC heap cap: ${POSTGREST_RTS_HEAP}M)"
+echo "insforge:      ${INSFORGE_MEM}MB (base: ${INSFORGE_BASE}MB)"
 echo "---"
 echo "Total allocated: ${TOTAL_ALLOCATED}MB / ${USABLE_MEM}MB usable"
 echo ""
@@ -131,17 +123,12 @@ cat >> "$ENV_FILE" << EOF
 
 # Auto-generated resource limits - $(date)
 # Total system memory: ${AVAILABLE_MEM}MB
-# Total CPUs: ${TOTAL_CPUS} (${RESERVED_CPU} reserved for host)
 # Usable memory: ${USABLE_MEM}MB (after ${RESERVED_MEM}MB system reservation)
 # Scaling factor: ${SCALE_FACTOR}
-# CPU scaling factor: ${CPU_SCALE_FACTOR}
 POSTGRES_MEMORY=${POSTGRES_MEM}M
 POSTGREST_MEMORY=${POSTGREST_MEM}M
 POSTGREST_RTS_HEAP=${POSTGREST_RTS_HEAP}M
 INSFORGE_MEMORY=${INSFORGE_MEM}M
-POSTGRES_CPUS=${POSTGRES_CPUS}
-POSTGREST_CPUS=${POSTGREST_CPUS}
-INSFORGE_CPUS=${INSFORGE_CPUS}
 PGRST_DB_POOL=${PGRST_DB_POOL}
 PG_MAX_CONNECTIONS=${PG_MAX_CONNECTIONS}
 EOF
