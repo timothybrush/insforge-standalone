@@ -40,12 +40,17 @@ RUNTIME=$(detect_runtime)
 # plainly (no sudo) and it re-execs the *installed, root-owned* copy under a
 # narrowly scoped sudoers rule.
 #
-# Why not let callers sudo this file directly: the repo checkout is owned by
-# ec2-user and updated by `git pull`, so a sudoers rule covering it would let
-# ec2-user rewrite the script and run arbitrary code as root -- blanket root
-# with extra steps. Only /usr/local/bin/insforge-ctl is root-owned, so only it
-# is safe to grant. The compose path needs no elevation at all (docker runs via
-# the docker group), which is why this is podman-only.
+# Why the installed copy rather than a sudoers rule over the checkout: it gives
+# the rule one stable path that exists even when the checkout is mid-`git pull`
+# or missing. Being explicit, since an earlier version of this comment claimed
+# more: it is NOT an immutability guarantee — sync_units below refreshes this
+# file from that same checkout, and it has to, or a fix to this script could
+# never reach an existing instance. On a project instance that costs nothing,
+# because SSM runs commands as root and the control plane drops to ec2-user by
+# choice: anything that can act as ec2-user here is already root.
+#
+# The compose path needs no elevation at all (docker runs via the docker group),
+# which is why this is podman-only.
 INSTALLED_CTL=/usr/local/bin/insforge-ctl
 if [ "$RUNTIME" = podman ] && [ "$(id -u)" != 0 ]; then
   [ -x "$INSTALLED_CTL" ] || {
@@ -144,7 +149,7 @@ usage() {
   cat >&2 <<'USAGE'
 usage: insforge-ctl <verb> [args]
 
-  runtime              print the detected runtime (podman|compose)
+  runtime              print the detected runtime (podman|compose|compose-v2)
   up                   start the whole stack
   down                 stop the whole stack
   restart              restart the whole stack (re-syncs units/env first on podman)

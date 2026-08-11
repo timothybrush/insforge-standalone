@@ -62,7 +62,18 @@ MAX_URLENCODED_BODY_SIZE=10mb
 API_BASE_URL=${VITE_API_BASE_URL:-}
 AWS_REGION=${AWS_REGION:-us-east-2}
 POSTGREST_MAX_SOCKETS=${PGRST_DB_POOL:-30}
+PORT=${PORT:-7130}
+POSTGRES_PORT=${POSTGRES_PORT:-5432}
+GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-http://localhost:7130/api/auth/v1/callback}
+GITHUB_REDIRECT_URI=${GITHUB_REDIRECT_URI:-http://localhost:7130/api/auth/v1/callback}
 EOF
+# The four above are keys docker-compose.yml supplies a literal default for
+# (:112, :121, :138, :141). The control plane writes all four into .env today,
+# so on a cloud instance these expand to the same values it already set — they
+# are here so that an .env *missing* one behaves the way compose does instead of
+# leaving it unset and relying on the image's internal default happening to
+# match. Later assignments win in an EnvironmentFile, so a value from .env is
+# preserved, not overridden.
 
 # --- multi-line secrets ---------------------------------------------------
 # systemd's Environment= accepts a double-quoted string with C-style escapes,
@@ -113,8 +124,24 @@ QUADLET_DIR=${QUADLET_DIR:-/etc/containers/systemd}
 PG_UNIT="$QUADLET_DIR/insforge-postgres.container"
 PGRST_UNIT="$QUADLET_DIR/insforge-postgrest.container"
 PG_ENC_KEY=${ENCRYPTION_KEY:-${JWT_SECRET:-dev-secret-please-change-in-production}}
+# The key is a secret of unknown shape — ENCRYPTION_KEY is usually absent and
+# this falls back to JWT_SECRET — and it passes through two parsers on the way
+# in: sed's replacement text, then systemd's Exec= tokenizer. `|` is the sed
+# delimiter and `&` means "the whole match", so either would corrupt the line;
+# whitespace would split the argument and hand postgres a truncated key, which
+# fails at decrypt time rather than at start. Escape for sed, then single-quote
+# for systemd exactly as docker-compose.yml:7 does. A literal single quote
+# cannot be expressed this way, so refuse rather than write a broken unit.
+case "$PG_ENC_KEY" in
+  *"'"*)
+    echo "FATAL: encryption key contains a single quote and cannot be quoted into the unit" >&2
+    exit 1
+    ;;
+esac
+PG_ENC_KEY_SED=$(printf '%s' "$PG_ENC_KEY" | sed -e 's/[\\&|]/\\&/g')
+
 if [ -f "$PG_UNIT" ]; then
-  sed -i "s|^Exec=postgres .*|Exec=postgres -c config_file=/etc/postgresql/postgresql.conf -c max_connections=${PG_MAX_CONNECTIONS:-100} -c app.encryption_key=${PG_ENC_KEY}|" \
+  sed -i "s|^Exec=postgres .*|Exec=postgres -c config_file=/etc/postgresql/postgresql.conf -c max_connections=${PG_MAX_CONNECTIONS:-100} -c app.encryption_key='${PG_ENC_KEY_SED}'|" \
     "$PG_UNIT"
   # This unit now holds the encryption key, so it stops being a world-readable
   # file like the other two. Applied here as well as at install time, because
