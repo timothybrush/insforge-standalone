@@ -73,8 +73,29 @@ into a provision with the instance already terminated by the rollback.
   than on the container's health status. `Notify=healthy` lands in podman 5.0
   and this can be simplified then.
 - Resource limits are cgroup settings on the units, written by
-  `insforge-render-env` from the `*_MEMORY` / `*_CPUS` values that
-  `auto-scale-memory.sh` puts in `.env` — not `PodmanArgs`. This buys
-  `MemoryHigh` (throttle before the OOM killer), which compose could not express.
+  `insforge-render-env` from the `*_MEMORY` values that `auto-scale-memory.sh`
+  puts in `.env` — not `PodmanArgs`. This buys `MemoryHigh` (throttle before the
+  OOM killer), which compose could not express. **Memory only: no `CPUQuota`.**
+  `auto-scale-memory.sh` strips `*_CPUS`, so any default quota would always be
+  the one in force, and a percentage cap on a nano is invisible at idle and
+  crippling under load — the hardest kind of regression to attribute later.
 - `insforge-render-env` runs on every `insforge-ctl restart`, so appending a
   key to `.env` and restarting behaves the way it did under compose.
+- `insforge-postgres.container` is installed `0600`, not `0644` like the other
+  units: `app.encryption_key` is a server start parameter, so it cannot come
+  from an `EnvironmentFile` and ends up on the unit's `Exec` line.
+- `insforge-ctl` installs these files as root from a checkout `ec2-user` can
+  write, and then executes `insforge-render-env` as root. Worth naming, but it is
+  not a boundary being crossed: SSM runs commands as root and the control plane
+  drops to `ec2-user` by choice, so anything that can act as `ec2-user` on a
+  project instance is already root. Note this also means the root-owned copy at
+  `/usr/local/bin` is not a protection — `sync_units` overwrites it from the
+  checkout on every restart. Its purpose is a stable path for one sudoers rule,
+  not immutability.
+- `sync_units` therefore **warns** about uncommitted changes under `systemd/` or
+  `insforge-ctl` and installs them anyway. Refusing would be worse than what it
+  prevents: `sync_units` is what makes a version bump take effect, its callers do
+  not check its status, so a refusal would silently skip the sync — and making it
+  fatal would break every restart on an instance someone hand-patched during an
+  incident. The warning reaches the SSM output and the journal, which is what
+  makes an unexpected edit visible.

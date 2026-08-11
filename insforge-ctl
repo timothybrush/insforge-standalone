@@ -81,11 +81,47 @@ load_env() {
 # quadlet the units live in /etc/containers/systemd and the tag lives inside
 # insforge.container, so without this a unit change or a version bump silently
 # no-ops on podman.
+# These files come from a checkout ec2-user can write, and root installs and
+# then executes them. That is worth naming, but it is not a privilege boundary
+# being crossed on a project instance: SSM runs commands as root and the control
+# plane drops to ec2-user by choice, so anything that can act as ec2-user here is
+# already root.
+#
+# So this warns rather than refusing. A hard failure here would be worse than
+# what it prevents: sync_units is what makes a version bump take effect, the
+# callers below do not check its status, and making it fatal would break every
+# restart on an instance someone hand-patched during an incident. The warning
+# lands in the SSM output and the journal, which is what actually makes an
+# unexpected edit visible.
+# git as root on a checkout owned by someone else refuses outright ("dubious
+# ownership", exit 128), so this has to drop to the owner to get an answer.
+# Overriding that with `-c safe.directory` would be the wrong fix: a repo-local
+# git config would then run commands as root, which is the exact shape of the
+# problem this check is about. Only the exit status is consumed.
+warn_if_locally_modified() {
+  local owner
+  owner=$(stat -c %U "$PROJECT_DIR" 2>/dev/null) || return 0
+  local as_owner=(git -C "$PROJECT_DIR")
+  [ "$(id -u)" = 0 ] && [ "$owner" != root ] && as_owner=(sudo -n -u "$owner" git -C "$PROJECT_DIR")
+  "${as_owner[@]}" rev-parse --git-dir >/dev/null 2>&1 || return 0
+  "${as_owner[@]}" diff --quiet HEAD -- systemd insforge-ctl 2>/dev/null && return 0
+  echo "warning: $PROJECT_DIR has uncommitted changes under systemd/ or insforge-ctl;" \
+       "installing them as root anyway" >&2
+}
+
 sync_units() {
   [ "$RUNTIME" = podman ] || return 0
   local src="$PROJECT_DIR/systemd"
   [ -d "$src" ] || return 0
-  install -m 0644 "$src"/*.container "$src"/*.network /etc/containers/systemd/ 2>/dev/null || true
+  warn_if_locally_modified
+  # The postgres unit carries app.encryption_key on its Exec line (a server
+  # start parameter cannot come from an EnvironmentFile), so it is installed
+  # 0600 rather than 0644 like the units that hold no secret. Quadlet generates
+  # as root and reads it fine.
+  install -m 0644 "$src"/*.network /etc/containers/systemd/ 2>/dev/null || true
+  install -m 0644 "$src/insforge.container" "$src/insforge-postgrest.container" \
+    /etc/containers/systemd/ 2>/dev/null || true
+  install -m 0600 "$src/insforge-postgres.container" /etc/containers/systemd/ 2>/dev/null || true
   install -m 0755 "$src/insforge-render-env" /usr/local/bin/insforge-render-env 2>/dev/null || true
   local ver
   ver=$(grep -E '^INSFORGE_OSS_VER=' "$PROJECT_DIR/.env" 2>/dev/null | cut -d= -f2)

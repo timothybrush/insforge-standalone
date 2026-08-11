@@ -116,6 +116,12 @@ PG_ENC_KEY=${ENCRYPTION_KEY:-${JWT_SECRET:-dev-secret-please-change-in-productio
 if [ -f "$PG_UNIT" ]; then
   sed -i "s|^Exec=postgres .*|Exec=postgres -c config_file=/etc/postgresql/postgresql.conf -c max_connections=${PG_MAX_CONNECTIONS:-100} -c app.encryption_key=${PG_ENC_KEY}|" \
     "$PG_UNIT"
+  # This unit now holds the encryption key, so it stops being a world-readable
+  # file like the other two. Applied here as well as at install time, because
+  # either step can be the one that ran last. (The key is also in .env at 0644,
+  # which is pre-existing and shared with the compose path — narrowing that is a
+  # separate change, not something this file can fix.)
+  chown 0:0 "$PG_UNIT" && chmod 0600 "$PG_UNIT"
 fi
 if [ -f "$PGRST_UNIT" ]; then
   sed -i "s|^Exec=postgrest .*|Exec=postgrest +RTS -M${POSTGREST_RTS_HEAP:-30M} -A2m -H24m -N1 -RTS|" \
