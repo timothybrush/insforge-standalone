@@ -1,0 +1,245 @@
+#!/bin/bash
+# insforge-ctl — runtime-agnostic control surface for a project instance.
+#
+# Why this exists: the fleet runs two container runtimes during the migration
+# (AL2023 + docker-compose, and Ubuntu + podman/quadlet), and an instance can
+# switch from one to the other without warning — a paused project's restore
+# provisions a brand-new instance from whatever AMI is current, so a project
+# created under compose can come back under podman. Encoding the runtime in
+# the control plane (a DB flag, a per-project branch) means two sources of
+# truth that eventually disagree. Instead the instance reports what it is:
+# every caller runs the same verbs here and this script picks the mechanism.
+#
+# Callers: the cloud control plane over SSM, and the backup/restore scripts.
+set -euo pipefail
+
+PROJECT_DIR=${INSFORGE_PROJECT_DIR:-/home/ec2-user/insforge-standalone}
+COMPOSE_FILE="$PROJECT_DIR/docker-compose.yml"
+QUADLET_MARKER=/etc/containers/systemd/insforge-postgres.container
+APP_UNITS=(insforge-postgres insforge-postgrest insforge)
+
+detect_runtime() {
+  if [ -f "$QUADLET_MARKER" ] && command -v podman >/dev/null 2>&1; then
+    echo podman
+  elif command -v docker-compose >/dev/null 2>&1; then
+    echo compose
+  elif command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    # Compose V2 plugin only (no `docker-compose` shim). The current fleet is
+    # all V1, but detecting `compose` and then calling a binary that does not
+    # exist would fail every verb, so pick the form that is actually present.
+    echo compose-v2
+  else
+    echo "insforge-ctl: no container runtime detected" >&2
+    exit 1
+  fi
+}
+RUNTIME=$(detect_runtime)
+
+# Self-elevate for podman. systemctl/podman need root, but the control plane
+# runs instance commands as ec2-user. Callers therefore invoke this script
+# plainly (no sudo) and it re-execs the *installed, root-owned* copy under a
+# narrowly scoped sudoers rule.
+#
+# Why not let callers sudo this file directly: the repo checkout is owned by
+# ec2-user and updated by `git pull`, so a sudoers rule covering it would let
+# ec2-user rewrite the script and run arbitrary code as root -- blanket root
+# with extra steps. Only /usr/local/bin/insforge-ctl is root-owned, so only it
+# is safe to grant. The compose path needs no elevation at all (docker runs via
+# the docker group), which is why this is podman-only.
+INSTALLED_CTL=/usr/local/bin/insforge-ctl
+if [ "$RUNTIME" = podman ] && [ "$(id -u)" != 0 ]; then
+  [ -x "$INSTALLED_CTL" ] || {
+    echo "insforge-ctl: podman needs root and $INSTALLED_CTL is not installed" >&2
+    exit 1
+  }
+  exec sudo -n "$INSTALLED_CTL" "$@"
+fi
+
+compose() {
+  if [ "$RUNTIME" = compose-v2 ]; then
+    (cd "$PROJECT_DIR" && docker compose "$@")
+  else
+    (cd "$PROJECT_DIR" && docker-compose "$@")
+  fi
+}
+
+# Load .env for the DB credentials used by the psql/pg_dump verbs.
+load_env() {
+  set -a
+  # shellcheck disable=SC1091
+  source "$PROJECT_DIR/.env"
+  set +a
+  PGUSER_="${POSTGRES_USER:-postgres}"
+  PGDB_="${POSTGRES_DB:-insforge}"
+  PGPASS_="${POSTGRES_PASSWORD:-postgres}"
+}
+
+# Re-install the quadlet units from the repo and re-derive the app image tag
+# from .env. Both matter because the control plane's flows assume compose
+# semantics: `git pull` then restart deployed a changed compose file, and
+# rewriting INSFORGE_OSS_VER in .env then restarting changed the image. Under
+# quadlet the units live in /etc/containers/systemd and the tag lives inside
+# insforge.container, so without this a unit change or a version bump silently
+# no-ops on podman.
+sync_units() {
+  [ "$RUNTIME" = podman ] || return 0
+  local src="$PROJECT_DIR/systemd"
+  [ -d "$src" ] || return 0
+  install -m 0644 "$src"/*.container "$src"/*.network /etc/containers/systemd/ 2>/dev/null || true
+  install -m 0755 "$src/insforge-render-env" /usr/local/bin/insforge-render-env 2>/dev/null || true
+  local ver
+  ver=$(grep -E '^INSFORGE_OSS_VER=' "$PROJECT_DIR/.env" 2>/dev/null | cut -d= -f2)
+  if [ -n "$ver" ]; then
+    sed -i "s|^Image=ghcr.io/insforge/insforge-oss:.*|Image=ghcr.io/insforge/insforge-oss:${ver}|" \
+      /etc/containers/systemd/insforge.container
+    podman pull "ghcr.io/insforge/insforge-oss:${ver}" >/dev/null 2>&1 || true
+  fi
+  systemctl daemon-reload
+}
+
+usage() {
+  cat >&2 <<'USAGE'
+usage: insforge-ctl <verb> [args]
+
+  runtime              print the detected runtime (podman|compose)
+  up                   start the whole stack
+  down                 stop the whole stack
+  restart              restart the whole stack (re-syncs units/env first on podman)
+  restart-app          restart only the app container, leaving Postgres up
+  stop-apps            stop insforge + postgrest, leave postgres running
+  start-all            start everything (used after stop-apps)
+  upgrade <version>    switch the app image tag and restart
+  prune                reclaim unused image/layer storage
+  psql [args...]       run psql against the project DB (stdin passthrough)
+  pg_dump [args...]    run pg_dump against the project DB (stdout passthrough)
+  status               one line per service
+USAGE
+  exit 64
+}
+
+[ $# -ge 1 ] || usage
+verb=$1; shift || true
+
+case "$verb" in
+  runtime)
+    echo "$RUNTIME"
+    ;;
+
+  up)
+    if [ "$RUNTIME" = podman ]; then
+      sync_units
+      /usr/local/bin/insforge-render-env
+      systemctl daemon-reload
+      systemctl start "${APP_UNITS[@]}"
+    else
+      compose up -d
+    fi
+    ;;
+
+  down)
+    if [ "$RUNTIME" = podman ]; then
+      systemctl stop "${APP_UNITS[@]}" || true
+    else
+      compose down
+    fi
+    ;;
+
+  restart)
+    if [ "$RUNTIME" = podman ]; then
+      # Re-sync units and the image tag, then re-render env: the control
+      # plane appends keys to .env and rewrites INSFORGE_OSS_VER, and expects a
+      # restart to pick both up — implicit under compose, which re-read .env
+      # and the compose file on every `up`.
+      sync_units
+      /usr/local/bin/insforge-render-env
+      systemctl daemon-reload
+      systemctl restart "${APP_UNITS[@]}"
+    else
+      compose down
+      compose up -d
+    fi
+    ;;
+
+  restart-app)
+    # App only. The reserved-secrets reset needs the app to re-read its
+    # secrets without bouncing Postgres, which a full-stack restart would do.
+    if [ "$RUNTIME" = podman ]; then
+      sync_units
+      /usr/local/bin/insforge-render-env
+      systemctl daemon-reload
+      systemctl restart insforge
+    else
+      compose restart insforge
+    fi
+    ;;
+
+  stop-apps)
+    if [ "$RUNTIME" = podman ]; then
+      systemctl stop insforge insforge-postgrest || true
+    else
+      compose stop insforge postgrest
+    fi
+    ;;
+
+  start-all)
+    "$0" up
+    ;;
+
+  upgrade)
+    [ $# -ge 1 ] || usage
+    version=$1
+    sed -i "s|^INSFORGE_OSS_VER=.*|INSFORGE_OSS_VER=${version}|" "$PROJECT_DIR/.env"
+    if [ "$RUNTIME" = podman ]; then
+      sed -i "s|^Image=ghcr.io/insforge/insforge-oss:.*|Image=ghcr.io/insforge/insforge-oss:${version}|" \
+        /etc/containers/systemd/insforge.container
+      podman pull "ghcr.io/insforge/insforge-oss:${version}"
+      /usr/local/bin/insforge-render-env
+      systemctl daemon-reload
+      systemctl restart insforge
+    else
+      compose pull insforge
+      compose up -d
+    fi
+    ;;
+
+  prune)
+    if [ "$RUNTIME" = podman ]; then
+      podman system prune -a -f
+    else
+      docker system prune -a -f
+    fi
+    ;;
+
+  # psql/pg_dump: on podman the host has a postgresql client and the server
+  # listens on 127.0.0.1, so no container round-trip is needed. On compose we
+  # keep going through the container because the AL2023 host has no client.
+  psql)
+    load_env
+    if [ "$RUNTIME" = podman ]; then
+      PGPASSWORD="$PGPASS_" psql -h 127.0.0.1 -U "$PGUSER_" -d "$PGDB_" "$@"
+    else
+      compose exec -T postgres env PGPASSWORD="$PGPASS_" psql -U "$PGUSER_" -d "$PGDB_" "$@"
+    fi
+    ;;
+
+  pg_dump)
+    load_env
+    if [ "$RUNTIME" = podman ]; then
+      PGPASSWORD="$PGPASS_" pg_dump -h 127.0.0.1 -U "$PGUSER_" "$@" "$PGDB_"
+    else
+      compose exec -T postgres env PGPASSWORD="$PGPASS_" pg_dump -U "$PGUSER_" "$@" "$PGDB_"
+    fi
+    ;;
+
+  status)
+    if [ "$RUNTIME" = podman ]; then
+      for u in "${APP_UNITS[@]}"; do echo "$u: $(systemctl is-active "$u")"; done
+    else
+      compose ps --format '{{.Name}}: {{.State}}' 2>/dev/null || compose ps
+    fi
+    ;;
+
+  *)
+    usage
+    ;;
+esac
