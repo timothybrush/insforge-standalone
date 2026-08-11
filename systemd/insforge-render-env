@@ -60,20 +60,28 @@ LOGS_DIR=/insforge-logs
 MAX_JSON_BODY_SIZE=100mb
 MAX_URLENCODED_BODY_SIZE=10mb
 API_BASE_URL=${VITE_API_BASE_URL:-}
-AWS_REGION=${AWS_REGION:-us-east-2}
+AWS_REGION=us-east-2
 POSTGREST_MAX_SOCKETS=${PGRST_DB_POOL:-30}
 PORT=${PORT:-7130}
 POSTGRES_PORT=${POSTGRES_PORT:-5432}
 GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-http://localhost:7130/api/auth/v1/callback}
 GITHUB_REDIRECT_URI=${GITHUB_REDIRECT_URI:-http://localhost:7130/api/auth/v1/callback}
 EOF
-# The four above are keys docker-compose.yml supplies a literal default for
-# (:112, :121, :138, :141). The control plane writes all four into .env today,
-# so on a cloud instance these expand to the same values it already set — they
-# are here so that an .env *missing* one behaves the way compose does instead of
-# leaving it unset and relying on the image's internal default happening to
-# match. Later assignments win in an EnvironmentFile, so a value from .env is
-# preserved, not overridden.
+# PORT, POSTGRES_PORT and the two redirect URIs are keys docker-compose.yml
+# supplies a literal default for (:112, :121, :138, :141). The control plane
+# writes all four into .env today, so on a cloud instance these expand to the
+# same values it already set — they are here so that an .env *missing* one
+# behaves the way compose does instead of leaving it unset and relying on the
+# image's internal default happening to match. Later assignments win in an
+# EnvironmentFile, so a value from .env is preserved, not overridden.
+# AWS_REGION is a literal, not ${AWS_REGION:-…}, because it means two different
+# things under one name. .env's AWS_REGION is the *instance's* region (us-west-1
+# for a us-test project) and the host aws CLI uses it; the container needs the
+# region of the shared storage bucket, which is us-east-2. docker-compose.yml:145
+# hardcodes it for exactly this reason. Deriving it from .env instead made every
+# storage upload on a project outside us-east-2 fail with S3 PermanentRedirect,
+# while provisioning, health and backups all stayed green — found by running the
+# E2E suite against a podman project and a compose project side by side.
 
 # --- multi-line secrets ---------------------------------------------------
 # systemd's Environment= accepts a double-quoted string with C-style escapes,
