@@ -123,6 +123,13 @@ sync_units() {
     /etc/containers/systemd/ 2>/dev/null || true
   install -m 0600 "$src/insforge-postgres.container" /etc/containers/systemd/ 2>/dev/null || true
   install -m 0755 "$src/insforge-render-env" /usr/local/bin/insforge-render-env 2>/dev/null || true
+  # Refresh the root-owned copy of this script too. Without this it stays frozen
+  # at whatever provisioning installed: the elevated process is
+  # /usr/local/bin/insforge-ctl, so a fix delivered by `git pull` would never run
+  # on an existing instance — the same silent no-op this function exists to
+  # prevent for units and image tags. Replacing the file under a running process
+  # is safe (the old inode stays open); it takes effect on the next invocation.
+  install -m 0755 "$PROJECT_DIR/insforge-ctl" "$INSTALLED_CTL" 2>/dev/null || true
   local ver
   ver=$(grep -E '^INSFORGE_OSS_VER=' "$PROJECT_DIR/.env" 2>/dev/null | cut -d= -f2)
   if [ -n "$ver" ]; then
