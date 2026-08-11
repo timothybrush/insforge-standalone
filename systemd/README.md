@@ -81,6 +81,13 @@ into a provision with the instance already terminated by the rollback.
   crippling under load — the hardest kind of regression to attribute later.
 - `insforge-render-env` runs on every `insforge-ctl restart`, so appending a
   key to `.env` and restarting behaves the way it did under compose.
+- `sync_units` also refreshes `/usr/local/bin/insforge-ctl` from the checkout,
+  because the elevated process *is* that copy — without it, a fix to this script
+  delivered by `git pull` would never run on an existing instance. Note the
+  bootstrap: the refresh can only happen from a version that already contains it,
+  so an instance whose installed copy predates this stays on the old one until it
+  is replaced. That is fine today because no instance is on podman in production
+  yet; every one will be provisioned with this version by `podman.sh`.
 - `insforge-postgres.container` is installed `0600`, not `0644` like the other
   units: `app.encryption_key` is a server start parameter, so it cannot come
   from an `EnvironmentFile` and ends up on the unit's `Exec` line.
