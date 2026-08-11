@@ -43,6 +43,26 @@ the unit passes it through with a valueless `-e AWS_CLOUDFRONT_PRIVATE_KEY`,
 which tells podman to inherit it from the process environment. Verified
 byte-for-byte inside the container.
 
+## What the image has to provide
+
+These units are not self-contained — they assume the host image already has
+certain things, and each assumption has bitten once. The bake script lives in
+insforge-cloud-backend (`config/ami/ubuntu-bake.sh`) because the AMI is only
+consumed by that control plane, so this is the contract it has to satisfy:
+
+| Requirement | Why |
+|---|---|
+| podman ≥ 4.9 with quadlet | These are quadlet `.container` files; quadlet is what generates the units |
+| `overlay` storage driver, not `fuse-overlayfs` | fuse-overlayfs adds a userspace daemon per layer stack — the exact overhead this migration exists to remove |
+| `postgresql-client` major **16** | `insforge-ctl psql`/`pg_dump` run on the host against the container. pg_dump 17+ emits settings a 15 server rejects, so the client major is pinned deliberately |
+| AWS CLI v2 **and** `unzip` | The S3 backup/restore helpers and the SSM-association wait shell out to `aws`. Provisioning installs the CLI if absent, and needs unzip to unpack it — an image with neither killed provisioning three times |
+| SSM agent from the **deb**, not snap | Removing the snap agent kills the process executing the user-data script, so the swap only works at bake time |
+| `systemd-zram-generator`, `zram-size = ram` | Swap is how a nano survives; installing the generator creates zram0 at ram/2 immediately and the config only takes effect on the next boot |
+
+Anything the units or `insforge-ctl` start depending on has to be added there
+and asserted in that script's post-boot checklist, not discovered at 20 seconds
+into a provision with the instance already terminated by the rollback.
+
 ## Other things worth knowing before editing these
 
 - Quadlet-generated units **cannot** be `systemctl enable`d ("transient or
