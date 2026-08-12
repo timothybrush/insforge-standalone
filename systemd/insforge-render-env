@@ -45,8 +45,19 @@ EOF
 # Allowlist real env lines by shape rather than blocklisting PEM bodies: a
 # wrapped base64 tail shorter than 40 chars would slip past a blocklist and
 # land in the env file as a junk variable.
+# The sed strips one layer of surrounding double quotes. .env quotes its values
+# because it is read with `source` in several places, where an unquoted space or
+# `;` would execute rather than assign. This file is the opposite: systemd's
+# EnvironmentFile= and podman's --env-file do not do shell parsing, and they do
+# NOT strip quotes — verified on a live instance, where a probe written as
+# KEY="a b;c" reached the container complete with its quotes. Copying .env
+# verbatim would therefore hand the app JWT_SECRET="…" while postgrest.env, which
+# is written from the sourced value, gets it clean: every PostgREST token check
+# would fail. A value cannot itself contain a double quote — the API rejects
+# that — so unwrapping one layer is unambiguous.
 grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$ENV_FILE" \
-  | grep -v '^AWS_CLOUDFRONT_PRIVATE_KEY=' > "$OUT/insforge.env"
+  | grep -v '^AWS_CLOUDFRONT_PRIVATE_KEY=' \
+  | sed -E 's/^([A-Za-z_][A-Za-z0-9_]*)="(.*)"$/\1=\2/' > "$OUT/insforge.env"
 # POSTGREST_MAX_SOCKETS was a compose literal and is absent from .env; the
 # app's PostgREST connection ceiling has to track the pool auto-scale sized.
 cat >> "$OUT/insforge.env" <<EOF
