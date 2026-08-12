@@ -8,7 +8,10 @@ Requires=insforge-postgres.service
 # overwrites this line from INSFORGE_OSS_VER when the control plane pins a
 # version, and `insforge-ctl upgrade <ver>` rewrites it on every upgrade.
 ContainerName=insforge
-Image=ghcr.io/insforge/insforge-oss:v2.3.0
+# Stamped by insforge-ctl from .env / docker-compose.yml on every up and
+# restart. Not a version to keep in sync: nothing starts this unit before that
+# has happened, and a real tag here would just be a second place to bump.
+Image=ghcr.io/insforge/insforge-oss:stamped-by-insforge-ctl
 Network=insforge.network
 PublishPort=7130:7130
 PublishPort=7131:7131

@@ -164,41 +164,25 @@ sync_and_render() {
   install -m 0644 "$src/insforge.container" "$src/insforge-postgrest.container" "$stage"/
   install -m 0600 "$src/insforge-postgres.container" "$stage"/
 
+  # Version: .env's pin, else the default docker-compose.yml declares. Compose is
+  # the only place it is declared — a tag in insforge.container would be a second
+  # place to bump at release time, and v2.3.1 bumped compose and missed it.
+  # `|| true`: this script runs under pipefail, and grep exits 1 when .env has no
+  # INSFORGE_OSS_VER line at all.
   local ver
-  # `|| true` is load-bearing: this script runs under `set -o pipefail`, so when
-  # .env has no INSFORGE_OSS_VER line at all, grep's exit 1 propagates out of the
-  # pipeline and the assignment aborts the whole script — before anything is
-  # rendered, with no message beyond exit 1. It survives today only because the
-  # provisioning script always writes the key, empty value included. That is a
-  # property of a file the control plane rewrites, not something to rely on.
   ver=$(grep -E '^INSFORGE_OSS_VER=' "$PROJECT_DIR/.env" 2>/dev/null | cut -d= -f2 || true)
   if [ -z "$ver" ]; then
-    # No pinned version: fall back to the one docker-compose.yml declares, not
-    # to whatever tag insforge.container happens to carry.
-    #
-    # The control plane leaves INSFORGE_OSS_VER empty whenever nobody named a
-    # version — on create, and on every restore-from-pause — and compose
-    # resolves that to its own ${INSFORGE_OSS_VER:-vX} literal. Reading the same
-    # literal is what keeps the two runtimes on one version. While the unit's own
-    # tag was the fallback instead, the two drifted the moment a release bumped
-    # one and not the other: v2.3.1 changed only docker-compose.yml, so new
-    # podman projects came up a release behind, and pausing then restoring a
-    # podman project silently downgraded it from v2.3.1 to v2.3.0. The unit keeps
-    # a tag so `systemctl start` works without this script; it just stops being
-    # the version anything resolves to.
-    #
-    # Same `|| true` for the same reason as above: sed exits 2 on a missing file
-    # and pipefail would turn an unreadable docker-compose.yml into a silent
-    # abort of the whole render. Falling through with an empty ver leaves the
-    # unit's own tag in place, which is the right degradation.
     ver=$(sed -nE 's|^[[:space:]]*image:[[:space:]]*ghcr\.io/insforge/insforge-oss:\$\{INSFORGE_OSS_VER:-([^}]+)\}.*|\1|p' \
       "$PROJECT_DIR/docker-compose.yml" 2>/dev/null | head -1 || true)
   fi
-  if [ -n "$ver" ]; then
-    sed -i "s|^Image=ghcr.io/insforge/insforge-oss:.*|Image=ghcr.io/insforge/insforge-oss:${ver}|" \
-      "$stage/insforge.container"
-    podman pull "ghcr.io/insforge/insforge-oss:${ver}" >/dev/null 2>&1 || true
-  fi
+  # Refuse rather than install the unstamped placeholder over a working unit.
+  [ -n "$ver" ] || {
+    echo "insforge-ctl: no app version in .env or docker-compose.yml" >&2
+    exit 1
+  }
+  sed -i "s|^Image=ghcr.io/insforge/insforge-oss:.*|Image=ghcr.io/insforge/insforge-oss:${ver}|" \
+    "$stage/insforge.container"
+  podman pull "ghcr.io/insforge/insforge-oss:${ver}" >/dev/null 2>&1 || true
 
   # Stamps the staged units and writes the env files / drop-ins. set -e aborts
   # here on failure, before anything reaches $live.
