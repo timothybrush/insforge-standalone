@@ -19,6 +19,10 @@ Exec=postgrest +RTS -M30M -A2m -H24m -N1 -RTS
 
 [Service]
 Restart=always
+# The pg_isready gate below runs up to 120s; systemd's default start timeout is
+# 90s, so without this postgrest is killed mid-wait on a slow first boot and
+# Restart=always turns that into a flap instead of a wait.
+TimeoutStartSec=300
 # Gate on the DB actually accepting connections (podman 4.9 has no Notify=healthy)
 ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do /usr/bin/pg_isready -q -h 127.0.0.1 -p 5432 && exit 0; sleep 2; done; exit 1'
 

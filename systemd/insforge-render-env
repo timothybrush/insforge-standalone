@@ -62,18 +62,19 @@ MAX_URLENCODED_BODY_SIZE=10mb
 API_BASE_URL=${VITE_API_BASE_URL:-}
 AWS_REGION=us-east-2
 POSTGREST_MAX_SOCKETS=${PGRST_DB_POOL:-30}
-PORT=${PORT:-7130}
-POSTGRES_PORT=${POSTGRES_PORT:-5432}
+PORT=7130
+POSTGRES_PORT=5432
 GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-http://localhost:7130/api/auth/v1/callback}
 GITHUB_REDIRECT_URI=${GITHUB_REDIRECT_URI:-http://localhost:7130/api/auth/v1/callback}
 EOF
-# PORT, POSTGRES_PORT and the two redirect URIs are keys docker-compose.yml
-# supplies a literal default for (:112, :121, :138, :141). The control plane
-# writes all four into .env today, so on a cloud instance these expand to the
-# same values it already set — they are here so that an .env *missing* one
-# behaves the way compose does instead of leaving it unset and relying on the
-# image's internal default happening to match. Later assignments win in an
-# EnvironmentFile, so a value from .env is preserved, not overridden.
+# PORT and POSTGRES_PORT are literals, matching docker-compose.yml:112 and :121
+# exactly — compose ignores whatever .env says for these. `${PORT:-7130}` looked
+# like the more faithful port and is not: a non-default PORT in .env would move
+# the app's listener while insforge.container still publishes 7130:7130, making
+# the project unreachable. The redirect URIs below do use the `${VAR:-default}`
+# form, because that is the form compose uses for them (:138, :141) — the
+# control plane sets them per project. Later assignments win in an
+# EnvironmentFile, so a value from .env is still preserved for those.
 # AWS_REGION is a literal, not ${AWS_REGION:-…}, because it means two different
 # things under one name. .env's AWS_REGION is the *instance's* region (us-west-1
 # for a us-test project) and the host aws CLI uses it; the container needs the

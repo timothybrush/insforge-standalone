@@ -14,7 +14,6 @@
 set -euo pipefail
 
 PROJECT_DIR=${INSFORGE_PROJECT_DIR:-/home/ec2-user/insforge-standalone}
-COMPOSE_FILE="$PROJECT_DIR/docker-compose.yml"
 QUADLET_MARKER=/etc/containers/systemd/insforge-postgres.container
 APP_UNITS=(insforge-postgres insforge-postgrest insforge)
 
@@ -109,7 +108,9 @@ warn_if_locally_modified() {
   local as_owner=(git -C "$PROJECT_DIR")
   [ "$(id -u)" = 0 ] && [ "$owner" != root ] && as_owner=(sudo -n -u "$owner" git -C "$PROJECT_DIR")
   "${as_owner[@]}" rev-parse --git-dir >/dev/null 2>&1 || return 0
-  "${as_owner[@]}" diff --quiet HEAD -- systemd insforge-ctl 2>/dev/null && return 0
+  # --untracked-files=all, because `git diff` does not report a file that was
+  # never added — an untracked systemd/*.container would install silently.
+  [ -z "$("${as_owner[@]}" status --porcelain --untracked-files=all -- systemd insforge-ctl 2>/dev/null)" ] && return 0
   echo "warning: $PROJECT_DIR has uncommitted changes under systemd/ or insforge-ctl;" \
        "installing them as root anyway" >&2
 }

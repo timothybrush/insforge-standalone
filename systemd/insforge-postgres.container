@@ -14,6 +14,8 @@ Volume=/home/ec2-user/insforge-standalone/docker-init/db/jwt.sql:/docker-entrypo
 Volume=/home/ec2-user/insforge-standalone/docker-init/db/postgresql.conf:/etc/postgresql/postgresql.conf:ro
 EnvironmentFile=/etc/insforge/postgres.env
 LogDriver=journald
+StopSignal=SIGINT
+StopTimeout=30
 HealthCmd=pg_isready -U postgres -d insforge -h 127.0.0.1
 HealthInterval=10s
 HealthRetries=30
@@ -31,6 +33,12 @@ Exec=postgres -c config_file=/etc/postgresql/postgresql.conf -c max_connections=
 [Service]
 Restart=always
 TimeoutStartSec=300
+# Match compose's stop_signal/stop_grace_period (docker-compose.yml:45-46).
+# Default SIGTERM is postgres' "smart shutdown": it waits for clients to
+# disconnect, so under load systemd's timeout expires and SIGKILL lands, which
+# means crash recovery on the next start. SIGINT is fast shutdown. TimeoutStopSec
+# is above podman's own stop timeout so systemd is not the one that gives up.
+TimeoutStopSec=45
 
 [Install]
 WantedBy=multi-user.target
