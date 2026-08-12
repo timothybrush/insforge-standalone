@@ -143,7 +143,15 @@ sync_units() {
       /etc/containers/systemd/insforge.container
     podman pull "ghcr.io/insforge/insforge-oss:${ver}" >/dev/null 2>&1 || true
   fi
-  systemctl daemon-reload
+  # Deliberately no daemon-reload here. Every caller runs
+  # sync_units -> insforge-render-env -> daemon-reload, and reloading in the
+  # middle would regenerate the service from the freshly installed *unstamped*
+  # postgres unit. If the render then aborted, the generated unit would be left
+  # without app.encryption_key — and because the units are
+  # WantedBy=multi-user.target, the next reboot starts postgres directly rather
+  # than through this script, so it would come up keyless and only fail later at
+  # decrypt time. Reloading once, after the stamping, means a failed render
+  # leaves the previous generated units in place instead.
 }
 
 usage() {

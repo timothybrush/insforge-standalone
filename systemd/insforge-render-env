@@ -53,12 +53,7 @@ cat >> "$OUT/insforge.env" <<EOF
 POSTGRES_HOST=postgres
 POSTGREST_BASE_URL=http://postgrest:3000
 DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-insforge}
-NODE_ENV=production
 PROJECT_ROOT=/app
-STORAGE_DIR=/insforge-storage
-LOGS_DIR=/insforge-logs
-MAX_JSON_BODY_SIZE=100mb
-MAX_URLENCODED_BODY_SIZE=10mb
 API_BASE_URL=${VITE_API_BASE_URL:-}
 AWS_REGION=us-east-2
 POSTGREST_MAX_SOCKETS=${PGRST_DB_POOL:-30}
@@ -147,6 +142,13 @@ case "$PG_ENC_KEY" in
     exit 1
     ;;
 esac
+# systemd reads % as a specifier introducer on Exec= lines, so a literal % has
+# to be doubled. A key containing %H would otherwise be substituted with the
+# hostname and an unknown specifier fails the unit — either way the key silently
+# stops being the key, which surfaces much later as a decrypt failure. Same
+# reasoning as the single-quote refusal below; JWT_SECRET is caller-supplied on
+# project create and is not guaranteed to be hex.
+PG_ENC_KEY=${PG_ENC_KEY//%/%%}
 PG_ENC_KEY_SED=$(printf '%s' "$PG_ENC_KEY" | sed -e 's/[\\&|]/\\&/g')
 
 if [ -f "$PG_UNIT" ]; then
