@@ -45,19 +45,35 @@ EOF
 # Allowlist real env lines by shape rather than blocklisting PEM bodies: a
 # wrapped base64 tail shorter than 40 chars would slip past a blocklist and
 # land in the env file as a junk variable.
-# The sed strips one layer of surrounding double quotes. .env quotes its values
-# because it is read with `source` in several places, where an unquoted space or
-# `;` would execute rather than assign. This file is the opposite: systemd's
-# EnvironmentFile= and podman's --env-file do not do shell parsing, and they do
-# NOT strip quotes — verified on a live instance, where a probe written as
-# KEY="a b;c" reached the container complete with its quotes. Copying .env
-# verbatim would therefore hand the app JWT_SECRET="…" while postgrest.env, which
-# is written from the sourced value, gets it clean: every PostgREST token check
-# would fail. A value cannot itself contain a double quote — the API rejects
-# that — so unwrapping one layer is unambiguous.
-grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$ENV_FILE" \
-  | grep -v '^AWS_CLOUDFRONT_PRIVATE_KEY=' \
-  | sed -E 's/^([A-Za-z_][A-Za-z0-9_]*)="(.*)"$/\1=\2/' > "$OUT/insforge.env"
+# Emit the values bash parsed, not the text they were written as.
+#
+# .env is shell input: `source` resolves quoting and escaping, so the only
+# faithful representation of a value is the variable's contents. This file is the
+# opposite — systemd's EnvironmentFile= and podman's --env-file do no shell
+# parsing and do not strip anything (verified: a probe written as KEY="a b;c"
+# reached the container with its quotes). Copying .env's text across, with or
+# without unwrapping delimiters, gets the common case right and then quietly
+# disagrees with postgres.env/postgrest.env — which are written from the sourced
+# values — for anything single-quoted or escaped. Same secret, two strings, and
+# the symptom is every PostgREST token check failing on a box that reports
+# healthy. Reading the variables removes the whole class instead of the cases
+# someone thought of.
+#
+# The PEM is excluded because no env-file format can carry a newline; it goes
+# through the systemd drop-in below. Any other multi-line value would corrupt
+# this file the same way, so it is skipped loudly rather than written.
+: > "$OUT/insforge.env"
+while IFS= read -r key; do
+  [ "$key" = AWS_CLOUDFRONT_PRIVATE_KEY ] && continue
+  value=${!key-}
+  case $value in
+    *$'\n'*)
+      echo "insforge-render-env: skipping multi-line value for $key" >&2
+      continue
+      ;;
+  esac
+  printf '%s=%s\n' "$key" "$value" >> "$OUT/insforge.env"
+done < <(sed -nE 's/^([A-Za-z_][A-Za-z0-9_]*)=.*/\1/p' "$ENV_FILE" | awk '!seen[$0]++')
 # POSTGREST_MAX_SOCKETS was a compose literal and is absent from .env; the
 # app's PostgREST connection ceiling has to track the pool auto-scale sized.
 cat >> "$OUT/insforge.env" <<EOF
