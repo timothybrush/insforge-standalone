@@ -1,0 +1,50 @@
+[Unit]
+Description=InsForge Postgres (quadlet)
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+ContainerName=insforge-postgres
+Image=ghcr.io/insforge/postgres:v15.13.4
+Network=insforge.network
+PublishPort=5432:5432
+Volume=insforge-pgdata:/var/lib/postgresql/data
+Volume=/home/ec2-user/insforge-standalone/docker-init/db/db-init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+Volume=/home/ec2-user/insforge-standalone/docker-init/db/jwt.sql:/docker-entrypoint-initdb.d/02-jwt.sql:ro
+Volume=/home/ec2-user/insforge-standalone/docker-init/db/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+EnvironmentFile=/etc/insforge/postgres.env
+LogDriver=journald
+# Grace period only. The image already declares STOPSIGNAL SIGINT (verified:
+# podman image inspect -> SIGINT), so compose's stop_signal was redundant and
+# there is nothing to restate — what compose did add is stop_grace_period 30s
+# against a container default of 10s. Passed as a podman arg rather than the
+# StopTimeout= key, which podman 4.9's quadlet does not parse: adding it made
+# the generator drop this unit entirely, so `systemctl restart` reported
+# "insforge-postgres.service not found" while the previously generated unit kept
+# running and everything looked fine.
+HealthCmd=pg_isready -U postgres -d insforge -h 127.0.0.1
+HealthInterval=10s
+HealthRetries=30
+HealthStartPeriod=60s
+PodmanArgs=--network-alias=postgres --stop-timeout=30
+# max_connections and app.encryption_key are stamped here by
+# insforge-render-env from .env on every start -- they cannot be read from the
+# EnvironmentFile because they are server start parameters, and they cannot be
+# constants because auto-scale-memory.sh sizes max_connections per instance
+# tier. app.encryption_key is what schedules.encrypt_headers/decrypt_headers
+# read via current_setting(); without it, scheduled functions with headers
+# raise. Compose passed both on the command line for the same reasons.
+Exec=postgres -c config_file=/etc/postgresql/postgresql.conf -c max_connections=100
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+# Match compose's stop_signal/stop_grace_period (docker-compose.yml:45-46).
+# Default SIGTERM is postgres' "smart shutdown": it waits for clients to
+# disconnect, so under load systemd's timeout expires and SIGKILL lands, which
+# means crash recovery on the next start. SIGINT is fast shutdown. TimeoutStopSec
+# is above podman's own stop timeout so systemd is not the one that gives up.
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target
