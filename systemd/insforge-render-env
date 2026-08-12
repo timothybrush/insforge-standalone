@@ -7,7 +7,7 @@
 # ".env edited -> restart -> takes effect" work the way it did under compose.
 set -euo pipefail
 
-ENV_FILE=${ENV_FILE:-/home/ec2-user/insforge-standalone/.env}
+ENV_FILE=/home/ec2-user/insforge-standalone/.env
 OUT=/etc/insforge
 DROPIN=/etc/systemd/system/insforge.service.d
 
