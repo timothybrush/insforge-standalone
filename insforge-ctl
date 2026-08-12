@@ -174,13 +174,25 @@ sync_and_render() {
   install -m 0644 "$src/insforge.container" "$src/insforge-postgrest.container" "$stage"/
   install -m 0600 "$src/insforge-postgres.container" "$stage"/
 
+  # Version: .env's pin, else the default docker-compose.yml declares. Compose is
+  # the only place it is declared — a tag in insforge.container would be a second
+  # place to bump at release time, and v2.3.1 bumped compose and missed it.
+  # `|| true`: this script runs under pipefail, and grep exits 1 when .env has no
+  # INSFORGE_OSS_VER line at all.
   local ver
-  ver=$(grep -E '^INSFORGE_OSS_VER=' "$PROJECT_DIR/.env" 2>/dev/null | cut -d= -f2)
-  if [ -n "$ver" ]; then
-    sed -i "s|^Image=ghcr.io/insforge/insforge-oss:.*|Image=ghcr.io/insforge/insforge-oss:${ver}|" \
-      "$stage/insforge.container"
-    podman pull "ghcr.io/insforge/insforge-oss:${ver}" >/dev/null 2>&1 || true
+  ver=$(grep -E '^INSFORGE_OSS_VER=' "$PROJECT_DIR/.env" 2>/dev/null | cut -d= -f2 || true)
+  if [ -z "$ver" ]; then
+    ver=$(sed -nE 's|^[[:space:]]*image:[[:space:]]*ghcr\.io/insforge/insforge-oss:\$\{INSFORGE_OSS_VER:-([^}]+)\}.*|\1|p' \
+      "$PROJECT_DIR/docker-compose.yml" 2>/dev/null | head -1 || true)
   fi
+  # Refuse rather than install the unstamped placeholder over a working unit.
+  [ -n "$ver" ] || {
+    echo "insforge-ctl: no app version in .env or docker-compose.yml" >&2
+    exit 1
+  }
+  sed -i "s|^Image=ghcr.io/insforge/insforge-oss:.*|Image=ghcr.io/insforge/insforge-oss:${ver}|" \
+    "$stage/insforge.container"
+  podman pull "ghcr.io/insforge/insforge-oss:${ver}" >/dev/null 2>&1 || true
 
   # Stamps the staged units and writes the env files / drop-ins. set -e aborts
   # here on failure, before anything reaches $live.
