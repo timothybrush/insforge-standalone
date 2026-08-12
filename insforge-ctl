@@ -5,15 +5,25 @@
 # (AL2023 + docker-compose, and Ubuntu + podman/quadlet), and an instance can
 # switch from one to the other without warning — a paused project's restore
 # provisions a brand-new instance from whatever AMI is current, so a project
-# created under compose can come back under podman. Encoding the runtime in
-# the control plane (a DB flag, a per-project branch) means two sources of
-# truth that eventually disagree. Instead the instance reports what it is:
-# every caller runs the same verbs here and this script picks the mechanism.
+# created under compose can come back under podman. Every caller runs the same
+# verbs here and this script picks the mechanism.
+#
+# The detection below is deliberately not a lookup of something someone wrote
+# down. The control plane does record a runtime per deployment, because it has
+# to compose an SSM command before it can reach the instance at all — but that
+# is a different question from this one. This script runs *on* the box, where
+# the box itself is the cheapest and most current answer, and it is also what
+# you reach for by hand when something is already wrong. A tool that trusted a
+# label at that moment would be trusting the one thing an incident makes stale.
 #
 # Callers: the cloud control plane over SSM, and the backup/restore scripts.
 set -euo pipefail
 
-PROJECT_DIR=${INSFORGE_PROJECT_DIR:-/home/ec2-user/insforge-standalone}
+# Hardcoded, like the nine other places that name it: the control plane's
+# workingDir and podman.sh both fix this path, so an override here could only
+# ever point this script at a different checkout than the one holding the units
+# it manages and the one the caller cd'd into.
+PROJECT_DIR=/home/ec2-user/insforge-standalone
 QUADLET_MARKER=/etc/containers/systemd/insforge-postgres.container
 APP_UNITS=(insforge-postgres insforge-postgrest insforge)
 
