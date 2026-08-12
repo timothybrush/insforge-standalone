@@ -42,7 +42,7 @@ RUNTIME=$(detect_runtime)
 # Why the installed copy rather than a sudoers rule over the checkout: it gives
 # the rule one stable path that exists even when the checkout is mid-`git pull`
 # or missing. Being explicit, since an earlier version of this comment claimed
-# more: it is NOT an immutability guarantee — sync_units below refreshes this
+# more: it is NOT an immutability guarantee — sync_and_render below refreshes this
 # file from that same checkout, and it has to, or a fix to this script could
 # never reach an existing instance. On a project instance that costs nothing,
 # because SSM runs commands as root and the control plane drops to ec2-user by
@@ -92,7 +92,7 @@ load_env() {
 # already root.
 #
 # So this warns rather than refusing. A hard failure here would be worse than
-# what it prevents: sync_units is what makes a version bump take effect, the
+# what it prevents: sync_and_render is what makes a version bump take effect, the
 # callers below do not check its status, and making it fatal would break every
 # restart on an instance someone hand-patched during an incident. The warning
 # lands in the SSM output and the journal, which is what actually makes an
@@ -115,43 +115,72 @@ warn_if_locally_modified() {
        "installing them as root anyway" >&2
 }
 
-sync_units() {
-  [ "$RUNTIME" = podman ] || return 0
+# Install the units and render them into place as one operation, staging first.
+#
+# The staging matters. Quadlet regenerates the service units from
+# /etc/containers/systemd/*.container on every boot, so the file on disk — not
+# the generated unit in /run — is what survives a reboot. Installing the repo's
+# unstamped postgres unit there and only afterwards stamping app.encryption_key
+# into it leaves a window: if the render aborts, the next boot regenerates from
+# the unstamped file and Postgres comes up with no encryption key, failing later
+# at decrypt time rather than at start. Skipping the daemon-reload does not help,
+# because boot does not need one.
+#
+# So: install into a staging dir, render against that (insforge-render-env takes
+# QUADLET_DIR), and only move the results into place once the render succeeded.
+# A failed render leaves the previous, stamped units untouched.
+sync_and_render() {
+  if [ "$RUNTIME" != podman ]; then
+    return 0
+  fi
   local src="$PROJECT_DIR/systemd"
-  [ -d "$src" ] || return 0
+  local stage=/run/insforge/quadlet-staging
+  local live=/etc/containers/systemd
+
+  # Even with no repo checkout to sync from, the env files still have to be
+  # rendered — .env may have changed without the units having.
+  if [ ! -d "$src" ]; then
+    /usr/local/bin/insforge-render-env
+    systemctl daemon-reload
+    return 0
+  fi
+
   warn_if_locally_modified
-  # The postgres unit carries app.encryption_key on its Exec line (a server
-  # start parameter cannot come from an EnvironmentFile), so it is installed
-  # 0600 rather than 0644 like the units that hold no secret. Quadlet generates
-  # as root and reads it fine.
-  install -m 0644 "$src"/*.network /etc/containers/systemd/ 2>/dev/null || true
-  install -m 0644 "$src/insforge.container" "$src/insforge-postgrest.container" \
-    /etc/containers/systemd/ 2>/dev/null || true
-  install -m 0600 "$src/insforge-postgres.container" /etc/containers/systemd/ 2>/dev/null || true
   install -m 0755 "$src/insforge-render-env" /usr/local/bin/insforge-render-env 2>/dev/null || true
   # Refresh the root-owned copy of this script too. Without this it stays frozen
   # at whatever provisioning installed: the elevated process is
   # /usr/local/bin/insforge-ctl, so a fix delivered by `git pull` would never run
-  # on an existing instance — the same silent no-op this function exists to
-  # prevent for units and image tags. Replacing the file under a running process
-  # is safe (the old inode stays open); it takes effect on the next invocation.
+  # on an existing instance. Replacing the file under a running process is safe
+  # (the old inode stays open); it takes effect on the next invocation.
   install -m 0755 "$PROJECT_DIR/insforge-ctl" "$INSTALLED_CTL" 2>/dev/null || true
+
+  rm -rf "$stage"
+  mkdir -p "$stage"
+  # The postgres unit ends up carrying app.encryption_key on its Exec line (a
+  # server start parameter cannot come from an EnvironmentFile), so it is 0600
+  # rather than 0644 like the units that hold no secret. Quadlet generates as
+  # root and reads it fine.
+  install -m 0644 "$src"/*.network "$stage"/
+  install -m 0644 "$src/insforge.container" "$src/insforge-postgrest.container" "$stage"/
+  install -m 0600 "$src/insforge-postgres.container" "$stage"/
+
   local ver
   ver=$(grep -E '^INSFORGE_OSS_VER=' "$PROJECT_DIR/.env" 2>/dev/null | cut -d= -f2)
   if [ -n "$ver" ]; then
     sed -i "s|^Image=ghcr.io/insforge/insforge-oss:.*|Image=ghcr.io/insforge/insforge-oss:${ver}|" \
-      /etc/containers/systemd/insforge.container
+      "$stage/insforge.container"
     podman pull "ghcr.io/insforge/insforge-oss:${ver}" >/dev/null 2>&1 || true
   fi
-  # Deliberately no daemon-reload here. Every caller runs
-  # sync_units -> insforge-render-env -> daemon-reload, and reloading in the
-  # middle would regenerate the service from the freshly installed *unstamped*
-  # postgres unit. If the render then aborted, the generated unit would be left
-  # without app.encryption_key — and because the units are
-  # WantedBy=multi-user.target, the next reboot starts postgres directly rather
-  # than through this script, so it would come up keyless and only fail later at
-  # decrypt time. Reloading once, after the stamping, means a failed render
-  # leaves the previous generated units in place instead.
+
+  # Stamps the staged units and writes the env files / drop-ins. set -e aborts
+  # here on failure, before anything reaches $live.
+  QUADLET_DIR="$stage" /usr/local/bin/insforge-render-env
+
+  install -m 0644 "$stage"/*.network "$live"/
+  install -m 0644 "$stage/insforge.container" "$stage/insforge-postgrest.container" "$live"/
+  install -m 0600 "$stage/insforge-postgres.container" "$live"/
+  rm -rf "$stage"
+  systemctl daemon-reload
 }
 
 usage() {
@@ -184,9 +213,7 @@ case "$verb" in
 
   up)
     if [ "$RUNTIME" = podman ]; then
-      sync_units
-      /usr/local/bin/insforge-render-env
-      systemctl daemon-reload
+      sync_and_render
       systemctl start "${APP_UNITS[@]}"
     else
       compose up -d
@@ -207,9 +234,7 @@ case "$verb" in
       # plane appends keys to .env and rewrites INSFORGE_OSS_VER, and expects a
       # restart to pick both up — implicit under compose, which re-read .env
       # and the compose file on every `up`.
-      sync_units
-      /usr/local/bin/insforge-render-env
-      systemctl daemon-reload
+      sync_and_render
       systemctl restart "${APP_UNITS[@]}"
     else
       compose down
@@ -221,9 +246,7 @@ case "$verb" in
     # App only. The reserved-secrets reset needs the app to re-read its
     # secrets without bouncing Postgres, which a full-stack restart would do.
     if [ "$RUNTIME" = podman ]; then
-      sync_units
-      /usr/local/bin/insforge-render-env
-      systemctl daemon-reload
+      sync_and_render
       systemctl restart insforge
     else
       compose restart insforge
